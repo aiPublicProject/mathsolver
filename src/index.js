@@ -207,24 +207,34 @@ async function defaultTransport(url, body, apiKey) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Solve a math problem with a user-supplied (BYOK) OpenAI-compatible API key.
- * The returned answer is only `verified: true` when the model's verification
- * expression independently re-evaluates (locally) to the same number.
+ * BYOK client for an OpenAI-compatible endpoint. Instantiate once, solve many.
  *
- * @param {string} problem - e.g. "2x + 3 = 11, solve for x"
- * @param {object} opts
- * @param {string} opts.apiKey            - required, user's own key
- * @param {string} [opts.baseUrl]         - default https://api.openai.com/v1 (any OpenAI-compatible endpoint)
- * @param {string} [opts.model]           - default gpt-4o-mini
- * @param {function} [opts.transport]     - test injection: async (url, body, apiKey) => content
- * @returns {Promise<{answer:number, steps:string[], expression:string, evaluated:number, verified:boolean, retries:number}>}
+ * @example
+ *   const { MathSolver } = require('mathsolver');
+ *   const solver = new MathSolver({ apiKey: 'sk-...', baseUrl: 'https://api.deepseek.com/v1' });
+ *   const r = await solver.solve('2x + 3 = 11, solve for x'); // { answer: 4, verified: true, ... }
  */
-async function solve(problem, opts = {}) {
-  const { apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', transport = defaultTransport } = opts;
-  if (!apiKey) throw new SolverError('NO_API_KEY', 'opts.apiKey is required (BYOK: bring your own key)');
-  if (typeof problem !== 'string' || !problem.trim()) throw new SolverError('NO_PROBLEM', 'problem must be a non-empty string');
+class MathSolver {
+  constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeout = 60000, transport } = {}) {
+    if (!apiKey) throw new SolverError('NO_API_KEY', 'options.apiKey is required (BYOK: bring your own key)');
+    if (!/^https?:\/\//.test(baseUrl)) throw new SolverError('BAD_BASE_URL', 'baseUrl must be an http(s) URL, e.g. https://api.deepseek.com/v1');
+    this.apiKey = apiKey;
+    this.baseUrl = String(baseUrl).replace(/\/+$/, '');
+    this.model = model;
+    this.timeout = timeout;
+    this._transport = transport || defaultTransport;
+  }
 
-  const url = `${String(baseUrl).replace(/\/+$/, '')}/chat/completions`;
+  /**
+   * Solve a math problem. The answer is only `verified: true` when the model's
+   * verification expression independently re-evaluates (locally) to the same number.
+   * @param {string} problem - e.g. "2x + 3 = 11, solve for x"
+   * @returns {Promise<{answer:number, steps:string[], expression:string, evaluated:number, verified:boolean, retries:number}>}
+   */
+  async solve(problem) {
+    const { apiKey, model, _transport: transport } = this;
+    if (typeof problem !== 'string' || !problem.trim()) throw new SolverError('NO_PROBLEM', 'problem must be a non-empty string');
+    const url = `${this.baseUrl}/chat/completions`;
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: problem },
@@ -265,6 +275,10 @@ async function solve(problem, opts = {}) {
   }
 
   return { ...parsed, evaluated, verified, retries };
+  }
 }
 
-module.exports = { solve, evalExpression, parseSolverJSON, numericallyEqual, SolverError, SYSTEM_PROMPT };
+module.exports = { MathSolver, solve: deprecatedSolve, evalExpression, parseSolverJSON, numericallyEqual, SolverError, SYSTEM_PROMPT };
+
+/** @deprecated use `new MathSolver(...)` instead. */
+async function deprecatedSolve(problem, opts = {}) { return new MathSolver(opts).solve(problem); }

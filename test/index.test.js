@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { solve, evalExpression, SolverError } = require('../src/index.js');
+const { MathSolver, evalExpression, SolverError } = require('../src/index.js');
 
 /* ---------------- expression evaluator unit tests ---------------- */
 
@@ -57,20 +57,22 @@ const correctedBody = {
   }) } }],
 };
 
-test('solve verifies on first attempt (no retry)', async () => {
+test('MathSolver.solve verifies on first attempt (no retry)', async () => {
   const calls = [];
   const transport = async (url, body, key) => {
     calls.push({ url, body, key });
     return goodBody.choices[0].message.content;
   };
-  const result = await solve('2x + 3 = 11, solve for x', { apiKey: 'sk-test', transport });
+  const solver = new MathSolver({ apiKey: 'sk-test', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', transport });
+  const result = await solver.solve('2x + 3 = 11, solve for x');
   assert.strictEqual(result.answer, 4);
   assert.strictEqual(result.evaluated, 4);
   assert.strictEqual(result.verified, true);
   assert.strictEqual(result.retries, 0);
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].key, 'sk-test');
-  assert.ok(calls[0].url.endsWith('/chat/completions'));
+  assert.strictEqual(calls[0].url, 'https://api.deepseek.com/v1/chat/completions');
+  assert.strictEqual(calls[0].body.model, 'deepseek-chat');
 });
 
 test('solve retries once on verification mismatch and recovers', async () => {
@@ -79,7 +81,7 @@ test('solve retries once on verification mismatch and recovers', async () => {
     n++;
     return n === 1 ? wrongThenRight.choices[0].message.content : correctedBody.choices[0].message.content;
   };
-  const result = await solve('2x + 3 = 11', { apiKey: 'sk-test', transport });
+  const result = await new MathSolver({ apiKey: 'sk-test', transport }).solve('2x + 3 = 11');
   assert.strictEqual(result.verified, true);
   assert.strictEqual(result.retries, 1);
   assert.strictEqual(result.evaluated, 4);
@@ -91,30 +93,34 @@ test('solve retries once on invalid JSON, then succeeds', async () => {
     n++;
     return n === 1 ? 'sure! the answer is {"answer": 4, "steps": [], "verification": {"expression": "8/2"}} oops{' : goodBody.choices[0].message.content;
   };
-  const result = await solve('2x+3=11', { apiKey: 'sk-test', transport });
+  const result = await new MathSolver({ apiKey: 'sk-test', transport }).solve('2x+3=11');
   assert.strictEqual(result.verified, true);
 });
 
 test('solve throws INVALID_JSON when both replies are garbage', async () => {
   const transport = async () => 'I cannot answer that.';
-  await assert.rejects(solve('1+1', { apiKey: 'sk', transport }), (err) => err.code === 'INVALID_JSON');
+  await assert.rejects(new MathSolver({ apiKey: 'sk', transport }).solve('1+1'), (err) => err.code === 'INVALID_JSON');
 });
 
 test('solve propagates HTTP errors without retry', async () => {
   const transport = async () => { throw new SolverError('HTTP_ERROR', 'API responded 401'); };
-  await assert.rejects(solve('1+1', { apiKey: 'sk', transport }), (err) => err.code === 'HTTP_ERROR');
+  await assert.rejects(new MathSolver({ apiKey: 'sk', transport }).solve('1+1'), (err) => err.code === 'HTTP_ERROR');
 });
 
-test('solve throws NO_API_KEY before any network call', async () => {
+test('constructor throws NO_API_KEY before any network call', () => {
   let called = false;
   const transport = async () => { called = true; return ''; };
-  await assert.rejects(solve('1+1', { transport }), (err) => err.code === 'NO_API_KEY');
+  assert.throws(() => new MathSolver({ transport }), (err) => err.code === 'NO_API_KEY');
   assert.strictEqual(called, false);
+});
+
+test('constructor rejects bad baseUrl', () => {
+  assert.throws(() => new MathSolver({ apiKey: 'sk', baseUrl: 'not-a-url' }), (err) => err.code === 'BAD_BASE_URL');
 });
 
 test('solve returns verified:false when retry still mismatches', async () => {
   const transport = async () => wrongThenRight.choices[0].message.content;
-  const result = await solve('2x+3=11', { apiKey: 'sk', transport });
+  const result = await new MathSolver({ apiKey: 'sk', transport }).solve('2x+3=11');
   assert.strictEqual(result.verified, false);
   assert.strictEqual(result.retries, 1);
 });
