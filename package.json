@@ -1,0 +1,16 @@
+{
+  "name": "mathsolver",
+  "version": "0.1.0",
+  "description": "BYOK AI math solver with independent code verification — bring your own OpenAI-compatible API key, get answers that are verified by local expression evaluation before they reach you.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": ["math", "solver", "ai", "byok", "verification", "step-by-step", "education"],
+  "homepage": "https://mathsolver.help",
+  "repository": { "type": "git", "url": "git+https://github.com/mathsolver-help/mathsolver.git" },
+  "bugs": { "url": "https://github.com/mathsolver-help/mathsolver/issues" },
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}
