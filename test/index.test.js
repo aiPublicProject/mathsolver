@@ -124,3 +124,15 @@ test('solve returns verified:false when retry still mismatches', async () => {
   assert.strictEqual(result.verified, false);
   assert.strictEqual(result.retries, 1);
 });
+
+/* -------- smoke: real API (set SMOKE_API_KEY to run; key never touches git) -------- */
+test('smoke: real API round-trip', { skip: !process.env.SMOKE_API_KEY }, async () => {
+  const solver = new MathSolver({
+    apiKey: process.env.SMOKE_API_KEY,
+    baseUrl: process.env.SMOKE_BASE_URL || 'https://api.openai.com/v1',
+  });
+  const r = await solver.solve('2x + 3 = 11, solve for x');
+  console.log('smoke:', JSON.stringify({ answer: r.answer, verified: r.verified, retries: r.retries, steps: r.steps.length }));
+  assert.strictEqual(r.answer, 4);
+  assert.strictEqual(r.verified, true);
+});
