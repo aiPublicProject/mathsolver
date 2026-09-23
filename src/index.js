@@ -1,30 +1,41 @@
 'use strict';
 
 /**
- * mathsolver — BYOK AI math solver with independent verification.
+ * mathsolver — BYOK AI math solver with execution-based verification (v0.2).
  *
- * Core promise: an answer is only marked `verified: true` when a pure
- * arithmetic expression (returned by the model alongside the answer) is
- * evaluated locally by this package and matches the answer numerically.
- * No model output is ever executed as code.
+ * Correctness model (PAL-style): the model never states the answer.
+ * It returns a small JavaScript-like PROGRAM; this package executes the
+ * program deterministically and the execution output IS the answer.
+ * For equations, a CHECK expression ({x} placeholder) must evaluate to 0
+ * when the computed answer is substituted back into the original equation.
  */
 
 const SYSTEM_PROMPT = [
   'You are a precise math solver.',
   'Reply with STRICT JSON only, no markdown fences, in this exact shape:',
-  '{"answer": <number>, "steps": [<string>, ...], "verification": {"expression": "<string>"}}',
+  '{"program": "<string>", "steps": [<string>, ...], "check": "<string>"}',
   'Rules:',
-  '- "answer" must be a single number (the final result).',
-  '- "steps" must be an array of short plain-language explanation strings.',
-  '- "verification.expression" must be a pure arithmetic expression that',
-  '  evaluates to the answer. Allowed: numbers, + - * / % ^ ( ), and the',
-  '  functions abs sqrt sin cos tan ln log exp floor ceil round min max',
-  '  (log is base 10, ln is natural), and the constants pi and e.',
-  '- The expression must recompute the answer independently.',
+  '- "program" is a small JavaScript-like program that computes the final answer.',
+  '  One statement per line (or ; separated). Allowed statements:',
+  '      let NAME = EXPRESSION',
+  '      result = EXPRESSION',
+  '  EXPRESSIONs may use numbers, + - * / % ^ ( ), the functions',
+  '  abs sqrt sin cos tan ln log exp floor ceil round min max',
+  '  (log is base 10, ln is natural), the constants pi and e, and any',
+  '  variable defined by an earlier let. The value assigned to "result"',
+  '  is the answer. Never state the answer as a number in text.',
+  '- "steps" is an array of short plain-language explanation strings.',
+  '- "check" is a verification expression containing the placeholder {x}.',
+  '  After solving, {x} is replaced by the computed answer and the whole',
+  '  expression must evaluate to 0.',
+  '  For equations, substitute the answer back into the original equation',
+  '  (e.g. 2x+3=11 -> "2*{x}+3-11").',
+  '  For arithmetic, recompute via a different path and subtract the answer',
+  '  (e.g. 15% of 80 -> "80*15/100-{x}"). Provide "check" whenever possible.',
 ].join('\n');
 
-const CORRECTION_PROMPT = (evaluated, answer) =>
-  `Your verification expression evaluated to ${evaluated}, which does not match your answer ${answer}. ` +
+const CORRECTION_PROMPT = (reason) =>
+  `Your submission failed verification: ${reason}. ` +
   'Re-derive the problem carefully and reply again with the same strict JSON shape.';
 
 class SolverError extends Error {
@@ -56,7 +67,6 @@ function tokenize(src) {
     if (/[0-9.]/.test(ch)) {
       let j = i;
       while (j < src.length && /[0-9.]/.test(src[j])) j++;
-      // scientific notation: 1e-3 / 2E5
       if (/[eE]/.test(src[j] || '') && /[0-9+-]/.test(src[j + 1] || '')) {
         j++;
         if (/[+-]/.test(src[j] || '')) j++;
@@ -81,8 +91,12 @@ function tokenize(src) {
   return tokens;
 }
 
-/** Evaluate a pure arithmetic expression string to a number. Throws on anything else. */
-function evalExpression(src) {
+/**
+ * Evaluate a pure arithmetic expression string to a number.
+ * @param {string} src
+ * @param {Record<string, number>} [env] variable bindings from let-statements
+ */
+function evalExpression(src, env = {}) {
   if (typeof src !== 'string' || !src.trim()) throw new SolverError('EXPR_EMPTY', 'empty expression');
   const toks = tokenize(src);
   let pos = 0;
@@ -131,7 +145,9 @@ function evalExpression(src) {
     if (tok.t === 'num') { eat('num'); return tok.v; }
     if (tok.t === 'id') {
       eat('id');
-      const name = tok.v.toLowerCase();
+      const raw = tok.v;
+      if (Object.prototype.hasOwnProperty.call(env, raw)) return env[raw];
+      const name = raw.toLowerCase();
       if (peek() && peek().t === '(') {
         eat('(');
         const args = [parseExpr()];
@@ -142,7 +158,7 @@ function evalExpression(src) {
         return fn(...args);
       }
       if (name in CONSTS) return CONSTS[name];
-      throw new SolverError('EXPR_UNKNOWN_ID', `unknown identifier "${name}"`);
+      throw new SolverError('EXPR_UNKNOWN_ID', `unknown identifier "${raw}"`);
     }
     if (tok.t === '(') {
       eat('(');
@@ -159,7 +175,57 @@ function evalExpression(src) {
 }
 
 /* ------------------------------------------------------------------ */
-/* JSON extraction + answer coercion                                   */
+/* Program interpreter (JS-dialect subset: let / assignment / result)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Execute a model-generated program. Statements (one per line or ; separated):
+ *   let NAME = EXPRESSION | NAME = EXPRESSION | bare EXPRESSION
+ * The answer is the value of `result`, else the last bare expression.
+ * @param {string} src
+ * @returns {number}
+ */
+function runProgram(src) {
+  if (typeof src !== 'string' || !src.trim()) throw new SolverError('PROGRAM_EMPTY', 'empty program');
+  const env = {};
+  let resultDefined = false;
+  let lastValue;
+  const lines = src.split(/[\n;]+/).map((s) => s.trim()).filter(Boolean);
+  if (!lines.length) throw new SolverError('PROGRAM_EMPTY', 'empty program');
+  for (const line of lines) {
+    let m = line.match(/^let\s+([a-zA-Z_]\w*)\s*=\s*([\s\S]+)$/);
+    if (m) {
+      env[m[1]] = evalExpression(m[2], env);
+      if (m[1] === 'result') resultDefined = true;
+      continue;
+    }
+    m = line.match(/^([a-zA-Z_]\w*)\s*=\s*([\s\S]+)$/);
+    if (m) {
+      env[m[1]] = evalExpression(m[2], env);
+      if (m[1] === 'result') resultDefined = true;
+      continue;
+    }
+    lastValue = evalExpression(line, env);
+  }
+  if (resultDefined) return env.result;
+  if (lastValue !== undefined) return lastValue;
+  throw new SolverError('PROGRAM_NO_RESULT', 'program produced no result');
+}
+
+/**
+ * Substitute the computed answer into a check expression ({x} placeholder)
+ * and evaluate. Passes when the value is ~0 (scaled tolerance).
+ * @returns {{value: number, passed: boolean}}
+ */
+function runCheck(checkSrc, answer) {
+  const substituted = String(checkSrc).replace(/\{\s*x\s*\}/gi, `(${answer})`);
+  const value = evalExpression(substituted);
+  const passed = Math.abs(value) <= 1e-6 * Math.max(1, Math.abs(answer));
+  return { value, passed };
+}
+
+/* ------------------------------------------------------------------ */
+/* JSON extraction                                                     */
 /* ------------------------------------------------------------------ */
 
 function parseSolverJSON(text) {
@@ -167,22 +233,14 @@ function parseSolverJSON(text) {
   if (!match) throw new SolverError('INVALID_JSON', 'model reply contained no JSON object');
   let data;
   try { data = JSON.parse(match[0]); } catch { throw new SolverError('INVALID_JSON', 'model reply was not valid JSON'); }
-  if (typeof data.answer !== 'number' && typeof data.answer !== 'string') {
-    throw new SolverError('INVALID_JSON', 'model JSON is missing a numeric "answer"');
-  }
-  if (!data.verification || typeof data.verification.expression !== 'string') {
-    throw new SolverError('INVALID_JSON', 'model JSON is missing verification.expression');
+  if (typeof data.program !== 'string') {
+    throw new SolverError('INVALID_JSON', 'model JSON is missing "program"');
   }
   return {
-    answer: typeof data.answer === 'string' ? Number(String(data.answer).replace(/[^0-9.eE+-]/g, '')) : data.answer,
+    program: data.program,
     steps: Array.isArray(data.steps) ? data.steps.map(String) : [],
-    expression: data.verification.expression,
+    check: typeof data.check === 'string' && data.check.trim() ? data.check : null,
   };
-}
-
-function numericallyEqual(a, b, relTol = 1e-6) {
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  return Math.abs(a - b) <= relTol * Math.max(1, Math.abs(a), Math.abs(b));
 }
 
 /* ------------------------------------------------------------------ */
@@ -203,7 +261,7 @@ async function defaultTransport(url, body, apiKey) {
 }
 
 /* ------------------------------------------------------------------ */
-/* solve                                                               */
+/* Client                                                              */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -212,7 +270,9 @@ async function defaultTransport(url, body, apiKey) {
  * @example
  *   const { MathSolver } = require('mathsolver');
  *   const solver = new MathSolver({ apiKey: 'sk-...', baseUrl: 'https://api.deepseek.com/v1' });
- *   const r = await solver.solve('2x + 3 = 11, solve for x'); // { answer: 4, verified: true, ... }
+ *   const r = await solver.solve('2x + 3 = 11, solve for x');
+ *   // { answer: 4, verified: true, ... } — answer comes from executing the
+ *   // model-generated program locally, never from a number the model stated.
  */
 class MathSolver {
   constructor({ apiKey, baseUrl = 'https://api.openai.com/v1', model = 'gpt-4o-mini', timeout = 60000, transport } = {}) {
@@ -226,59 +286,75 @@ class MathSolver {
   }
 
   /**
-   * Solve a math problem. The answer is only `verified: true` when the model's
-   * verification expression independently re-evaluates (locally) to the same number.
-   * @param {string} problem - e.g. "2x + 3 = 11, solve for x"
-   * @returns {Promise<{answer:number, steps:string[], expression:string, evaluated:number, verified:boolean, retries:number}>}
+   * Solve a math problem. The answer is the output of executing the model's
+   * program; `verified` is true only when the check expression passes
+   * (equations: answer substituted back must satisfy the original equation).
+   * @param {string} problem
+   * @returns {Promise<{answer:number, steps:string[], program:string, check:(string|null), checkValue:(number|null), verified:boolean, retries:number}>}
    */
   async solve(problem) {
     const { apiKey, model, _transport: transport } = this;
     if (typeof problem !== 'string' || !problem.trim()) throw new SolverError('NO_PROBLEM', 'problem must be a non-empty string');
     const url = `${this.baseUrl}/chat/completions`;
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: problem },
-  ];
-  const call = () => transport(url, { model, messages, temperature: 0 }, apiKey);
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: problem },
+    ];
+    const call = () => transport(url, { model, messages, temperature: 0 }, apiKey);
 
-  let parsed;
-  try {
-    parsed = parseSolverJSON(await call());
-  } catch (err) {
-    if (err.code !== 'INVALID_JSON') throw err;
-    messages.push({ role: 'assistant', content: 'invalid JSON' }, { role: 'user', content: 'Your reply was not valid JSON. Reply again with the exact strict JSON shape.' });
-    parsed = parseSolverJSON(await call()); // second failure throws
-  }
-
-  let evaluated = null;
-  let verified = false;
-  try {
-    evaluated = evalExpression(parsed.expression);
-    verified = numericallyEqual(evaluated, parsed.answer);
-  } catch {
-    verified = false;
-  }
-
-  let retries = 0;
-  if (!verified) {
-    retries = 1;
-    messages.push({ role: 'assistant', content: JSON.stringify({ ...parsed, verification: { expression: parsed.expression } }) },
-                   { role: 'user', content: CORRECTION_PROMPT(evaluated ?? 'an error', parsed.answer) });
+    let parsed;
     try {
-      const second = parseSolverJSON(await call());
-      evaluated = evalExpression(second.expression);
-      verified = numericallyEqual(evaluated, second.answer);
-      if (verified || numericallyEqual(evaluated, second.answer)) parsed = second;
-    } catch {
-      /* keep first attempt; verified stays false */
+      parsed = parseSolverJSON(await call());
+    } catch (err) {
+      if (err.code !== 'INVALID_JSON') throw err;
+      messages.push({ role: 'assistant', content: 'invalid JSON' },
+                    { role: 'user', content: 'Your reply was not valid JSON. Reply again with the exact strict JSON shape.' });
+      parsed = parseSolverJSON(await call()); // second failure throws
     }
-  }
 
-  return { ...parsed, evaluated, verified, retries };
+    // attempt: execute program + run check. Never throws; reports ok/error.
+    const attempt = (p) => {
+      try {
+        const answer = runProgram(p.program);
+        let checkValue = null;
+        let verified = false;
+        if (p.check) {
+          const r = runCheck(p.check, answer);
+          checkValue = r.value;
+          verified = r.passed;
+        }
+        return { ok: true, answer, checkValue, verified };
+      } catch (err) {
+        return { ok: false, error: err };
+      }
+    };
+
+    let outcome = attempt(parsed);
+    let retries = 0;
+    if (!outcome.ok || !outcome.verified) {
+      retries = 1;
+      const reason = !outcome.ok
+        ? `program failed to execute (${outcome.error.code}: ${outcome.error.message})`
+        : `check evaluated to ${outcome.checkValue} instead of 0`;
+      messages.push({ role: 'assistant', content: JSON.stringify(parsed) },
+                    { role: 'user', content: CORRECTION_PROMPT(reason) });
+      const secondParsed = parseSolverJSON(await call());
+      const second = attempt(secondParsed);
+      if (!second.ok) throw second.error; // PROGRAM_* error persisted after retry
+      parsed = secondParsed;
+      outcome = second;
+    }
+
+    return {
+      answer: outcome.answer,
+      steps: parsed.steps,
+      program: parsed.program,
+      check: parsed.check,
+      checkValue: outcome.checkValue,
+      verified: outcome.verified,
+      retries,
+    };
   }
 }
 
-module.exports = { MathSolver, solve: deprecatedSolve, evalExpression, parseSolverJSON, numericallyEqual, SolverError, SYSTEM_PROMPT };
-
-/** @deprecated use `new MathSolver(...)` instead. */
-async function deprecatedSolve(problem, opts = {}) { return new MathSolver(opts).solve(problem); }
+module.exports = { MathSolver, evalExpression, runProgram, runCheck, parseSolverJSON, SolverError, SYSTEM_PROMPT };
