@@ -165,6 +165,7 @@ test('smoke: real API round-trip', { skip: !process.env.SMOKE_API_KEY }, async (
   const solver = new MathSolver({
     apiKey: process.env.SMOKE_API_KEY,
     baseUrl: process.env.SMOKE_BASE_URL || 'https://api.openai.com/v1',
+    model: process.env.SMOKE_MODEL || 'gpt-4o-mini',
   });
   const r = await solver.solve('2x + 3 = 11, solve for x');
   console.log('smoke:', JSON.stringify({ answer: r.answer, verified: r.verified, retries: r.retries, steps: r.steps.length }));
