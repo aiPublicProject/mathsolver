@@ -1,5 +1,5 @@
 {
-  "name": "mathsolver",
+  "name": "mathsolver-help",
   "version": "0.2.0",
   "description": "BYOK AI math solver with execution-based verification (PAL-style) — bring your own OpenAI-compatible API key; the answer is computed locally by executing a model-generated program, never taken from a number the model stated.",
   "main": "src/index.js",
