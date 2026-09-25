@@ -1,6 +1,6 @@
 {
   "name": "mathsolver-help",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "BYOK AI math solver with execution-based verification (PAL-style) — bring your own OpenAI-compatible API key; the answer is computed locally by executing a model-generated program, never taken from a number the model stated.",
   "main": "src/index.js",
   "types": "src/index.d.ts",
@@ -10,7 +10,8 @@
   },
   "keywords": ["math", "solver", "ai", "byok", "verification", "step-by-step", "education", "pal", "program-of-thought"],
   "homepage": "https://mathsolver.help",
-  "repository": "https://mathsolver.help",
+  "repository": { "type": "git", "url": "git+https://github.com/aiPublicProject/mathsolver.git" },
+  "bugs": { "url": "https://github.com/aiPublicProject/mathsolver/issues" },
   "license": "MIT",
   "engines": { "node": ">=18" }
 }
